@@ -117,7 +117,7 @@ func (bm *BuildMonitor) MonitorBuild(command string, args ...string) error {
 
 // monitorProcessTree continuously monitors the process tree starting from rootPID
 func (bm *BuildMonitor) monitorProcessTree(rootPID int32) {
-	ticker := time.NewTicker(100 * time.Millisecond) // High frequency monitoring
+	ticker := time.NewTicker(50 * time.Millisecond) // Higher frequency for better responsiveness
 	defer ticker.Stop()
 
 	for {
@@ -262,14 +262,16 @@ func (bm *BuildMonitor) updateProcessInfo(proc *process.Process) {
 	
 	procInfo.Status = "running"
 	
-	// Create resource update event
-	event := BuildEvent{
-		Timestamp: time.Now(),
-		Type:      "resource_update",
-		Process:   *procInfo,
+	// Only send resource updates for significant changes to reduce noise
+	if procInfo.CPUUsage > 5.0 || len(procInfo.Children) > 0 {
+		event := BuildEvent{
+			Timestamp: time.Now(),
+			Type:      "resource_update",
+			Process:   *procInfo,
+		}
+		bm.events = append(bm.events, event)
+		bm.broadcastEvent(event)
 	}
-	bm.events = append(bm.events, event)
-	bm.broadcastEvent(event)
 }
 
 // broadcastEvent sends an event to all WebSocket subscribers
@@ -372,20 +374,28 @@ func (bm *BuildMonitor) handleIndex(w http.ResponseWriter, r *http.Request) {
         .completed { background: #FF9800; }
         ul { list-style: none; padding: 0; }
         li { background: #3d3d3d; margin: 2px 0; padding: 8px; border-radius: 3px; }
+        @keyframes pulse {
+            0% { transform: scale(1); box-shadow: 0 0 0 0 rgba(76, 175, 80, 0.7); }
+            50% { transform: scale(1.05); box-shadow: 0 0 0 10px rgba(76, 175, 80, 0); }
+            100% { transform: scale(1); box-shadow: 0 0 0 0 rgba(76, 175, 80, 0); }
+        }
     </style>
 </head>
 <body>
     <div class="container">
         <h1>🔥 BuildSpy - Real-time Build Process Monitor</h1>
         <div id="status" class="status">Connecting...</div>
+        <div id="build-status" class="status" style="display: none;">
+            <span id="build-indicator">🔨</span>
+            <span id="build-text">Build in progress...</span>
+        </div>
         
         <div class="section">
-            <h3>Flame Graph - Process Hierarchy</h3>
+            <h3>⏱️ Process Timeline - Real-time Build Visualization</h3>
             <div id="flame-graph" class="flame-graph"></div>
         </div>
         
         <div class="section">
-            <h3>Recent Events</h3>
             <div id="timeline" class="timeline"></div>
         </div>
         
@@ -403,6 +413,7 @@ func (bm *BuildMonitor) handleIndex(w http.ResponseWriter, r *http.Request) {
         ws.onopen = () => {
             document.getElementById('status').textContent = '✅ Connected - Monitoring active';
             document.getElementById('status').style.background = '#4CAF50';
+            document.getElementById('build-status').style.display = 'block';
         };
         
         ws.onclose = () => {
@@ -415,13 +426,57 @@ func (bm *BuildMonitor) handleIndex(w http.ResponseWriter, r *http.Request) {
             document.getElementById('status').style.background = '#FF9800';
         };
 
+        // Build state tracking
+        let buildCompleted = false;
+        let buildStatus = 'running';
+        
+        // Throttle updates to improve performance
+        let updatePending = false;
+        
         ws.onmessage = (event) => {
             const data = JSON.parse(event.data);
             events.push(data);
             processes.set(data.process.pid, data.process);
-            buildProcessHierarchy();
-            updateVisualization();
+            
+            // Check for build completion
+            if (data.type === 'build_complete') {
+                buildCompleted = true;
+                buildStatus = 'completed';
+                updateBuildStatus();
+            }
+            
+            // Throttle visualization updates
+            if (!updatePending) {
+                updatePending = true;
+                setTimeout(() => {
+                    buildProcessHierarchy();
+                    updateVisualization();
+                    updatePending = false;
+                }, 250); // Update at most 4 times per second
+            }
         };
+
+        function updateBuildStatus() {
+            const buildStatusDiv = document.getElementById('build-status');
+            const buildIndicator = document.getElementById('build-indicator');
+            const buildText = document.getElementById('build-text');
+            
+            if (buildCompleted) {
+                buildIndicator.textContent = '✅';
+                buildText.textContent = 'Build completed successfully!';
+                buildStatusDiv.style.background = '#4CAF50';
+                buildStatusDiv.style.border = '2px solid #66BB6A';
+                
+                // Add celebration effect
+                buildStatusDiv.style.animation = 'pulse 2s ease-in-out 3';
+            } else {
+                const activeProcs = Array.from(processes.values()).filter(p => p.status === 'running');
+                buildIndicator.textContent = '🔨';
+                buildText.textContent = 'Build in progress... (' + activeProcs.length + ' active processes)';
+                buildStatusDiv.style.background = '#2196F3';
+                buildStatusDiv.style.border = '2px solid #42A5F5';
+            }
+        }
 
         function buildProcessHierarchy() {
             processHierarchy = {};
@@ -436,89 +491,182 @@ func (bm *BuildMonitor) handleIndex(w http.ResponseWriter, r *http.Request) {
             });
         }
 
+        // Timeline visualization state
+        let timelineData = [];
+        let startTime = null;
+        
         function updateVisualization() {
-            updateFlameGraph();
-            updateTimeline();
-            updateProcessDetails();
+            updateTimelineChart();
+            updateEventLog();
+            updateProcessSummary();
         }
 
-        function updateFlameGraph() {
+        function updateTimelineChart() {
             const container = d3.select('#flame-graph');
             container.selectAll('*').remove();
             
-            const width = 800;
+            const width = 1000;
             const height = 400;
+            const margin = {top: 20, right: 50, bottom: 40, left: 100};
+            
             const svg = container.append('svg')
                 .attr('width', width)
                 .attr('height', height);
 
-            const processArray = Array.from(processes.values()).filter(p => p.status === 'running' || p.end_time);
-            
-            if (processArray.length === 0) {
+            // Build timeline data from events
+            if (events.length === 0) {
                 svg.append('text')
                     .attr('x', width/2)
                     .attr('y', height/2)
                     .attr('text-anchor', 'middle')
                     .style('fill', '#666')
                     .style('font-size', '18px')
-                    .text('No processes detected yet...');
+                    .text('Waiting for build to start...');
                 return;
             }
 
-            // Calculate positions based on hierarchy and timing
-            const maxDepth = Math.max(...processArray.map(p => getProcessDepth(p.pid))) || 1;
-            const rectHeight = Math.min(40, (height - 40) / maxDepth);
-            const rectWidth = Math.max(60, (width - 100) / processArray.length);
+            // Set start time from first event
+            if (!startTime) {
+                startTime = new Date(events[0].timestamp);
+            }
 
-            const rects = svg.selectAll('rect')
-                .data(processArray)
+            // Build timeline segments for each process
+            const processTimeline = new Map();
+            events.forEach(event => {
+                const pid = event.process.pid;
+                const timestamp = new Date(event.timestamp);
+                
+                if (!processTimeline.has(pid)) {
+                    processTimeline.set(pid, {
+                        pid: pid,
+                        name: event.process.name,
+                        start: timestamp,
+                        end: null,
+                        maxCpu: 0,
+                        status: event.process.status
+                    });
+                }
+                
+                const proc = processTimeline.get(pid);
+                if (event.type === 'process_end') {
+                    proc.end = timestamp;
+                    proc.status = 'completed';
+                }
+                if (event.process.cpu_usage > proc.maxCpu) {
+                    proc.maxCpu = event.process.cpu_usage;
+                }
+            });
+
+            const timelineArray = Array.from(processTimeline.values())
+                .filter(p => p.start)
+                .sort((a, b) => a.start - b.start);
+
+            if (timelineArray.length === 0) return;
+
+            // Calculate time scale
+            const now = new Date();
+            const endTime = Math.max(...timelineArray.map(p => p.end ? p.end.getTime() : now.getTime()));
+            const duration = endTime - startTime.getTime();
+            
+            const xScale = d3.scaleLinear()
+                .domain([0, duration])
+                .range([margin.left, width - margin.right]);
+
+            const yScale = d3.scaleBand()
+                .domain(timelineArray.map((d, i) => i))
+                .range([margin.top, height - margin.bottom])
+                .padding(0.1);
+
+            // Draw timeline bars
+            const bars = svg.selectAll('.timeline-bar')
+                .data(timelineArray)
                 .enter()
                 .append('g')
-                .attr('class', 'process-group');
+                .attr('class', 'timeline-bar');
 
-            // Draw process rectangles
-            rects.append('rect')
-                .attr('class', 'process-rect')
-                .attr('x', (d, i) => 50 + (i * rectWidth))
-                .attr('y', d => 20 + (getProcessDepth(d.pid) * rectHeight))
-                .attr('width', rectWidth - 2)
-                .attr('height', rectHeight - 2)
+            bars.append('rect')
+                .attr('x', d => xScale(d.start.getTime() - startTime.getTime()))
+                .attr('y', (d, i) => yScale(i))
+                .attr('width', d => {
+                    const end = d.end ? d.end.getTime() : now.getTime();
+                    const w = xScale(end - startTime.getTime()) - xScale(d.start.getTime() - startTime.getTime());
+                    return Math.max(2, w);
+                })
+                .attr('height', yScale.bandwidth())
                 .attr('fill', d => {
                     if (d.status === 'running') return '#4CAF50';
                     if (d.status === 'completed') return '#FF9800';
                     return '#2196F3';
                 })
-                .attr('stroke', '#333')
-                .attr('stroke-width', 1)
+                .attr('opacity', d => Math.min(0.9, 0.3 + (d.maxCpu / 100) * 0.6))
                 .on('mouseover', function(event, d) {
-                    d3.select(this).attr('stroke-width', 3);
-                    showTooltip(event, d);
+                    // Remove any existing tooltips first
+                    d3.selectAll('#tooltip').remove();
+                    showProcessTooltip(event, d);
                 })
                 .on('mouseout', function(event, d) {
-                    d3.select(this).attr('stroke-width', 1);
                     hideTooltip();
                 });
 
             // Add process labels
-            rects.append('text')
-                .attr('x', (d, i) => 50 + (i * rectWidth) + rectWidth/2)
-                .attr('y', d => 20 + (getProcessDepth(d.pid) * rectHeight) + rectHeight/2)
-                .attr('text-anchor', 'middle')
-                .attr('dominant-baseline', 'central')
-                .style('fill', 'white')
-                .style('font-size', '10px')
-                .style('pointer-events', 'none')
-                .text(d => d.name.length > 8 ? d.name.substring(0, 8) + '...' : d.name);
-
-            // Add PID labels
-            rects.append('text')
-                .attr('x', (d, i) => 50 + (i * rectWidth) + rectWidth/2)
-                .attr('y', d => 20 + (getProcessDepth(d.pid) * rectHeight) + rectHeight/2 + 12)
-                .attr('text-anchor', 'middle')
+            bars.append('text')
+                .attr('x', margin.left - 5)
+                .attr('y', (d, i) => yScale(i) + yScale.bandwidth()/2)
+                .attr('text-anchor', 'end')
+                .attr('dominant-baseline', 'middle')
                 .style('fill', '#ccc')
-                .style('font-size', '8px')
-                .style('pointer-events', 'none')
-                .text(d => d.pid);
+                .style('font-size', '11px')
+                .text(d => d.name + ' (' + d.pid + ')');
+
+            // Add time axis
+            const timeAxis = d3.axisBottom(xScale)
+                .tickFormat(d => Math.round(d/1000) + 's');
+                
+            svg.append('g')
+                .attr('transform', 'translate(0, ' + (height - margin.bottom) + ')')
+                .style('color', '#ccc')
+                .call(timeAxis);
+
+            // Add current time indicator if build is running, or completion marker if done
+            const activeProcs = Array.from(processes.values()).filter(p => p.status === 'running');
+            const currentX = xScale(now.getTime() - startTime.getTime());
+            
+            if (buildCompleted) {
+                // Build completion marker
+                svg.append('line')
+                    .attr('x1', currentX)
+                    .attr('x2', currentX)
+                    .attr('y1', margin.top)
+                    .attr('y2', height - margin.bottom)
+                    .attr('stroke', '#4CAF50')
+                    .attr('stroke-width', 3)
+                    .attr('opacity', 0.9);
+                    
+                svg.append('text')
+                    .attr('x', currentX + 5)
+                    .attr('y', margin.top + 15)
+                    .attr('fill', '#4CAF50')
+                    .style('font-size', '12px')
+                    .style('font-weight', 'bold')
+                    .text('BUILD COMPLETE ✅');
+            } else if (activeProcs.length > 0) {
+                // Current time indicator for running build
+                svg.append('line')
+                    .attr('x1', currentX)
+                    .attr('x2', currentX)
+                    .attr('y1', margin.top)
+                    .attr('y2', height - margin.bottom)
+                    .attr('stroke', '#FF5722')
+                    .attr('stroke-width', 2)
+                    .attr('opacity', 0.8);
+                    
+                svg.append('text')
+                    .attr('x', currentX + 5)
+                    .attr('y', margin.top + 15)
+                    .attr('fill', '#FF5722')
+                    .style('font-size', '12px')
+                    .text('NOW');
+            }
         }
 
         function getProcessDepth(pid) {
@@ -530,7 +678,10 @@ func (bm *BuildMonitor) handleIndex(w http.ResponseWriter, r *http.Request) {
             return 1;
         }
 
-        function showTooltip(event, d) {
+        function showProcessTooltip(event, d) {
+            // Always remove existing tooltips first
+            d3.selectAll('#tooltip').remove();
+            
             const tooltip = d3.select('body').append('div')
                 .attr('id', 'tooltip')
                 .style('position', 'absolute')
@@ -539,34 +690,44 @@ func (bm *BuildMonitor) handleIndex(w http.ResponseWriter, r *http.Request) {
                 .style('padding', '10px')
                 .style('border-radius', '5px')
                 .style('pointer-events', 'none')
+                .style('z-index', '9999')
+                .style('border', '1px solid #555')
+                .style('box-shadow', '0 4px 8px rgba(0,0,0,0.3)')
                 .style('opacity', 0);
 
-            tooltip.html(` + "`" + `
-                <strong>${d.name}</strong><br/>
-                PID: ${d.pid}<br/>
-                PPID: ${d.ppid}<br/>
-                CPU: ${d.cpu_usage.toFixed(2)}%<br/>
-                Memory: ${Math.round(d.mem_usage / 1024)}KB<br/>
-                Status: ${d.status}<br/>
-                Command: ${d.cmdline.substring(0, 50)}...
-            ` + "`" + `)
+            const duration = d.end ? (d.end.getTime() - d.start.getTime()) / 1000 : 
+                             (Date.now() - d.start.getTime()) / 1000;
+
+            const endText = d.end ? '<br/>End: ' + d.end.toLocaleTimeString() : '<br/>Still running...';
+
+            tooltip.html(
+                '<strong>' + d.name + '</strong><br/>' +
+                'PID: ' + d.pid + '<br/>' +
+                'Duration: ' + duration.toFixed(2) + 's<br/>' +
+                'Max CPU: ' + d.maxCpu.toFixed(1) + '%<br/>' +
+                'Status: ' + d.status + '<br/>' +
+                'Start: ' + d.start.toLocaleTimeString() + 
+                endText
+            )
             .style('left', (event.pageX + 10) + 'px')
             .style('top', (event.pageY - 10) + 'px')
             .transition()
+            .duration(150)
             .style('opacity', 1);
         }
 
         function hideTooltip() {
-            d3.select('#tooltip').remove();
+            d3.selectAll('#tooltip').transition().duration(200).style('opacity', 0).remove();
         }
 
-        function updateTimeline() {
+        function updateEventLog() {
             const timeline = d3.select('#timeline');
             timeline.selectAll('*').remove();
             
+            timeline.append('h4').text('Recent Events').style('color', '#ccc');
             const list = timeline.append('ul');
             
-            events.slice(-15).reverse().forEach(event => {
+            events.slice(-20).reverse().forEach(event => {
                 const item = list.append('li');
                 const timestamp = new Date(event.timestamp).toLocaleTimeString();
                 const eventType = event.type.replace('_', ' ').toUpperCase();
@@ -590,61 +751,106 @@ func (bm *BuildMonitor) handleIndex(w http.ResponseWriter, r *http.Request) {
             }
         }
 
-        function updateProcessDetails() {
+        function updateProcessSummary() {
             const details = d3.select('#process-details');
             details.selectAll('*').remove();
             
             const activeProcesses = Array.from(processes.values()).filter(p => p.status === 'running');
+            const totalProcesses = processes.size;
+            const completedProcesses = totalProcesses - activeProcesses.length;
             
-            details.append('h3').text(` + "`" + `Active Processes (${activeProcesses.length})` + "`" + `);
+            // Summary stats
+            details.append('h3').text('Build Summary');
             
-            if (activeProcesses.length === 0) {
-                details.append('p').style('color', '#666').text('No active processes');
-                return;
-            }
+            const statsDiv = details.append('div').style('display', 'flex').style('gap', '20px').style('margin-bottom', '20px');
             
-            const table = details.append('table');
+            statsDiv.append('div')
+                .style('background', '#2d2d2d')
+                .style('padding', '10px')
+                .style('border-radius', '5px')
+                .html(` + "`" + `<strong>Total Processes</strong><br/><span style="font-size: 24px; color: #2196F3;">${totalProcesses}</span>` + "`" + `);
             
-            // Header
-            const header = table.append('thead').append('tr');
-            ['PID', 'Name', 'CPU %', 'Memory (KB)', 'Threads', 'Duration'].forEach(col => {
-                header.append('th').text(col);
-            });
+            statsDiv.append('div')
+                .style('background', '#2d2d2d')
+                .style('padding', '10px')
+                .style('border-radius', '5px')
+                .html(` + "`" + `<strong>Active</strong><br/><span style="font-size: 24px; color: #4CAF50;">${activeProcesses.length}</span>` + "`" + `);
             
-            // Rows
-            const tbody = table.append('tbody');
-            activeProcesses
-                .sort((a, b) => b.cpu_usage - a.cpu_usage) // Sort by CPU usage
-                .forEach(proc => {
-                    const row = tbody.append('tr');
-                    const duration = proc.start_time ? 
-                        Math.round((Date.now() - new Date(proc.start_time)) / 1000) : 0;
-                    
-                    [
-                        proc.pid,
-                        proc.name,
-                        proc.cpu_usage.toFixed(1),
-                        Math.round(proc.mem_usage / 1024),
-                        proc.children ? proc.children.length : 0,
-                        duration + 's'
-                    ].forEach((val, i) => {
-                        const cell = row.append('td').text(val);
-                        if (i === 2 && parseFloat(val) > 50) { // High CPU usage
-                            cell.style('color', '#FF5722');
-                        }
-                    });
+            statsDiv.append('div')
+                .style('background', '#2d2d2d')
+                .style('padding', '10px')
+                .style('border-radius', '5px')
+                .html(` + "`" + `<strong>Completed</strong><br/><span style="font-size: 24px; color: #FF9800;">${completedProcesses}</span>` + "`" + `);
+            
+            // Active processes table (only if there are any)
+            if (activeProcesses.length > 0) {
+                details.append('h4').text('Currently Running').style('color', '#ccc');
+                
+                const table = details.append('table');
+                
+                // Header
+                const header = table.append('thead').append('tr');
+                ['PID', 'Name', 'CPU %', 'Memory (KB)', 'Duration'].forEach(col => {
+                    header.append('th').text(col);
                 });
+                
+                // Rows
+                const tbody = table.append('tbody');
+                activeProcesses
+                    .sort((a, b) => b.cpu_usage - a.cpu_usage) // Sort by CPU usage
+                    .slice(0, 10) // Show only top 10
+                    .forEach(proc => {
+                        const row = tbody.append('tr');
+                        const duration = proc.start_time ? 
+                            Math.round((Date.now() - new Date(proc.start_time)) / 1000) : 0;
+                        
+                        [
+                            proc.pid,
+                            proc.name.length > 15 ? proc.name.substring(0, 15) + '...' : proc.name,
+                            proc.cpu_usage.toFixed(1),
+                            Math.round(proc.mem_usage / 1024),
+                            duration + 's'
+                        ].forEach((val, i) => {
+                            const cell = row.append('td').text(val);
+                            if (i === 2 && parseFloat(val) > 50) { // High CPU usage
+                                cell.style('color', '#FF5722');
+                            }
+                        });
+                    });
+            }
         }
 
         // Initialize
         updateVisualization();
         
-        // Periodic updates for duration calculation
+        // Periodic updates for duration calculation and timeline refresh
         setInterval(() => {
             if (processes.size > 0) {
-                updateProcessDetails();
+                updateProcessSummary();
+                updateBuildStatus(); // Update build status regularly
+                
+                // Also refresh timeline to update running process durations
+                const activeProcs = Array.from(processes.values()).filter(p => p.status === 'running');
+                if (activeProcs.length > 0) {
+                    updateTimelineChart();
+                }
             }
         }, 1000);
+        
+        // Global mouse handler to hide tooltips when moving away from chart
+        d3.select('body').on('mouseover', function(event) {
+            // If mouse is not over a timeline bar or tooltip, hide tooltips
+            if (!event.target.closest('.timeline-bar') && !event.target.closest('#tooltip')) {
+                const tooltip = d3.select('#tooltip');
+                if (!tooltip.empty()) {
+                    setTimeout(() => {
+                        if (!d3.select('#tooltip').empty()) {
+                            hideTooltip();
+                        }
+                    }, 100); // Small delay to prevent flicker
+                }
+            }
+        });
     </script>
 </body>
 </html>`

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 )
 
 func main() {
@@ -16,7 +17,11 @@ func main() {
 	flag.Parse()
 
 	if *buildCmd == "" {
-		fmt.Fprintf(os.Stderr, "Usage: %s -cmd <build-command> [options]\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "Usage: %s -cmd \"<build-command>\" [options]\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "Examples:\n")
+		fmt.Fprintf(os.Stderr, "  %s -cmd \"make -j16\"\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s -cmd \"ninja -v\"\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s -cmd \"cmake --build . --parallel 8\"\n", os.Args[0])
 		flag.PrintDefaults()
 		os.Exit(1)
 	}
@@ -27,8 +32,17 @@ func main() {
 	// Start web server for real-time visualization
 	go monitor.StartWebServer(*webPort)
 	
+	// Parse command and arguments
+	cmdParts := strings.Fields(*buildCmd)
+	if len(cmdParts) == 0 {
+		log.Fatalf("Invalid build command: %s", *buildCmd)
+	}
+	
+	command := cmdParts[0]
+	args := append(cmdParts[1:], flag.Args()...)
+	
 	// Monitor the build process
-	if err := monitor.MonitorBuild(*buildCmd, flag.Args()...); err != nil {
+	if err := monitor.MonitorBuild(command, args...); err != nil {
 		log.Fatalf("Monitoring failed: %v", err)
 	}
 	

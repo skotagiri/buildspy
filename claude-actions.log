@@ -3,3 +3,9 @@
 2025-08-28: Fixed flame graph visualization - Enhanced real-time updates with proper D3.js implementation, interactive tooltips, dark theme UI, hierarchical process tree layout, and improved WebSocket event handling for smooth real-time monitoring.
 
 2025-08-28: Modified program lifecycle - BuildSpy now continues running after build completion, keeping the web server active until all browser connections close or Ctrl+C is pressed. Added build completion events and graceful shutdown handling.
+
+2025-08-28: Redesigned visualization for performance - Replaced hierarchical flame graph with real-time timeline chart showing process durations, CPU usage opacity, throttled updates (4fps), reduced noise by filtering low-CPU events, and added build summary stats with active/completed process counts.
+
+2025-08-28: Fixed tooltip issues and command parsing - Tooltips now properly disappear on mouseout with improved cleanup, global mouse handler, and better z-index. Also fixed command argument parsing to support quoted commands like "./buildspy -cmd 'make -j16'" by splitting the command string properly.
+
+2025-08-28: Added build completion indicators - Web viewer now shows clear build status with animated completion notification, build progress counter, visual completion marker on timeline with green "BUILD COMPLETE ✅" label, and pulsing animation effect when build finishes successfully.
