@@ -1,0 +1,5 @@
+2025-08-28: Implemented BuildSpy - A comprehensive Go-based build system monitoring tool with real-time process tracking, flame graph visualization, CPU/memory monitoring, thread inspection, and web dashboard. Supports Make, Ninja, CMake, Bazel, and other build systems with automatic detection and performance analysis.
+
+2025-08-28: Fixed flame graph visualization - Enhanced real-time updates with proper D3.js implementation, interactive tooltips, dark theme UI, hierarchical process tree layout, and improved WebSocket event handling for smooth real-time monitoring.
+
+2025-08-28: Modified program lifecycle - BuildSpy now continues running after build completion, keeping the web server active until all browser connections close or Ctrl+C is pressed. Added build completion events and graceful shutdown handling.
