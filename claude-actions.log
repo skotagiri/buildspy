@@ -9,3 +9,20 @@
 2025-08-28: Fixed tooltip issues and command parsing - Tooltips now properly disappear on mouseout with improved cleanup, global mouse handler, and better z-index. Also fixed command argument parsing to support quoted commands like "./buildspy -cmd 'make -j16'" by splitting the command string properly.
 
 2025-08-28: Added build completion indicators - Web viewer now shows clear build status with animated completion notification, build progress counter, visual completion marker on timeline with green "BUILD COMPLETE ✅" label, and pulsing animation effect when build finishes successfully.
+
+2025-08-28: Split buildspy into two-component architecture:
+- buildspy: CLI tool for capturing build metrics to BadgerDB database
+- buildspyd: Daemon serving web dashboard for historical build analysis  
+- Added multi-run management with search and filtering
+- Implemented persistent storage with BadgerDB for long-term retention
+- Created comprehensive web interface supporting both live and historical views
+- Added REST API and WebSocket endpoints for programmatic access
+- Built complete Makefile system for two-binary build process
+
+2025-08-28: Refactored codebase to eliminate code duplication:
+- Created proper Go package structure with shared packages
+- Moved models, database, monitoring, and config into separate packages
+- Eliminated 3x duplication of models.go and database.go files
+- CLI and daemon now import shared packages instead of duplicating code
+- Fixed flag conflicts by renaming verbose flags from -v to -verbose
+- Successfully tested both CLI tool and daemon with new architecture
