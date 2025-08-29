@@ -1,8 +1,8 @@
 # BuildSpy Makefile
-.PHONY: all clean buildspy buildspyd deps test install
+.PHONY: all clean buildspy buildspyd deps test install gui
 
 # Default target builds both binaries
-all: buildspy buildspyd
+all: buildspy buildspyd gui
 
 # Clean build artifacts
 clean:
@@ -23,6 +23,10 @@ buildspy:
 buildspyd:
 	cd cmd/buildspyd && go build -o ../../buildspyd .
 
+# Build buildspyd daemon
+gui:
+	cd gui && go build -o ../gui .
+
 # Install binaries to system
 install: buildspy buildspyd
 	install -m 755 buildspy /usr/local/bin/
@@ -40,6 +44,9 @@ dev-buildspy:
 
 dev-buildspyd:
 	cd cmd/buildspyd && go run . $(ARGS)
+
+dev-buildsppgui:
+	cd gui && go run . $(ARGS)
 
 # Help target
 help:

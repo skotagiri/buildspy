@@ -62,3 +62,24 @@
 - Crashed builds show 💥 icon in web interface with "CRASHED" status
 - Creates "build_crashed" events and properly calculates duration for failed builds
 - Prevents live builds from staying stuck in "running" state indefinitely
+
+2025-08-29: Created comprehensive API documentation:
+- Documented all HTTP endpoints (/api/runs, /api/live, /api/stats, etc.)
+- Added WebSocket endpoint documentation (/ws/live, /ws/runs/{id})
+- Documented all data models (BuildRun, ProcessInfo, BuildEvent)
+- Added status values, error responses, and background processing details
+- Created docs/API.md for GUI client development reference
+
+2025-08-29: Added delete functionality to daemon API:
+- Added DELETE /api/runs endpoint for bulk deletion via query params
+- Added DELETE /api/runs/{id} for single build deletion
+- Added POST /api/delete for bulk deletion with JSON body
+- Implemented safety checks to prevent deletion of live builds
+- Returns detailed response with success/error counts and specific error messages
+
+2025-08-29: Implemented Fyne GUI application foundation:
+- Created GUI project structure with Go modules and Fyne framework
+- Implemented main application window with navigation and two-view layout
+- Created comprehensive API client with all daemon endpoints
+- Added health checking, error handling, and proper timeout configuration
+- Integrated data fetching and UI refresh functionality for live and completed builds

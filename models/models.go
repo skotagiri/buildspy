@@ -8,16 +8,16 @@ import (
 
 // BuildRun represents a single build execution session
 type BuildRun struct {
-	ID          string    `json:"id"`          // UUID for the build run
-	Command     string    `json:"command"`     // Build command executed
-	Args        []string  `json:"args"`        // Command arguments
-	StartTime   time.Time `json:"start_time"`  // When build started
-	EndTime     *time.Time `json:"end_time,omitempty"` // When build completed (nil if running)
-	Status      string    `json:"status"`      // "running", "completed", "failed"
-	ExitCode    *int      `json:"exit_code,omitempty"` // Exit code if completed
-	WorkingDir  string    `json:"working_dir"` // Directory where build was executed
-	ProcessCount int      `json:"process_count"` // Total processes spawned
-	Duration    *int64    `json:"duration,omitempty"` // Duration in milliseconds (nil if running)
+	ID           string     `json:"id"`                  // UUID for the build run
+	Command      string     `json:"command"`             // Build command executed
+	Args         []string   `json:"args"`                // Command arguments
+	StartTime    time.Time  `json:"start_time"`          // When build started
+	EndTime      *time.Time `json:"end_time,omitempty"`  // When build completed (nil if running)
+	Status       string     `json:"status"`              // "running", "completed", "failed"
+	ExitCode     *int       `json:"exit_code,omitempty"` // Exit code if completed
+	WorkingDir   string     `json:"working_dir"`         // Directory where build was executed
+	ProcessCount int        `json:"process_count"`       // Total processes spawned
+	Duration     *int64     `json:"duration,omitempty"`  // Duration in milliseconds (nil if running)
 }
 
 // NewBuildRun creates a new build run with generated UUID
@@ -65,7 +65,7 @@ type ProcessInfo struct {
 // BuildEvent represents a timeline event during the build
 // Extended from original with build run association
 type BuildEvent struct {
-	ID         string      `json:"id"`         // UUID for the event
+	ID         string      `json:"id"`           // UUID for the event
 	BuildRunID string      `json:"build_run_id"` // Associated build run
 	Timestamp  time.Time   `json:"timestamp"`
 	Type       string      `json:"type"` // "process_start", "process_end", "resource_update", "build_complete"
@@ -93,7 +93,7 @@ const (
 	KeyTimeIndex       = "timeindex:" // Time-based index for efficient querying
 )
 
-// GenerateKey creates database keys for different entity types
+// Key GenerateKey creates database keys for different entity types
 func (br *BuildRun) Key() string {
 	return KeyPrefixBuildRun + br.ID
 }

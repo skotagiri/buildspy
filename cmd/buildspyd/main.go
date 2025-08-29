@@ -109,6 +109,7 @@ func NewBuildspyDaemon(cfg *config.DaemonConfig) (*BuildspyDaemon, error) {
 	mux.HandleFunc("/api/live", daemon.handleLiveBuilds)
 	mux.HandleFunc("/api/stats", daemon.handleStats)
 	mux.HandleFunc("/api/live/submit", daemon.handleLiveSubmit)
+	mux.HandleFunc("/api/delete", daemon.handleDelete)
 	mux.HandleFunc("/ws/live", daemon.handleLiveWebSocket)
 	mux.HandleFunc("/ws/runs/", daemon.handleRunWebSocket)
 
@@ -198,6 +199,8 @@ func (d *BuildspyDaemon) handleRuns(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case "GET":
 		d.handleListRuns(w, r)
+	case "DELETE":
+		d.handleDeleteRun(w, r)
 	default:
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 	}
@@ -294,15 +297,26 @@ func (d *BuildspyDaemon) handleRunDetails(w http.ResponseWriter, r *http.Request
 		resource = parts[1]
 	}
 
-	switch resource {
-	case "events":
-		d.handleRunEvents(w, r, runID)
-	case "processes":
-		d.handleRunProcesses(w, r, runID)
-	case "":
-		d.handleRunInfo(w, r, runID)
+	switch r.Method {
+	case "GET":
+		switch resource {
+		case "events":
+			d.handleRunEvents(w, r, runID)
+		case "processes":
+			d.handleRunProcesses(w, r, runID)
+		case "":
+			d.handleRunInfo(w, r, runID)
+		default:
+			http.Error(w, "Unknown resource", http.StatusNotFound)
+		}
+	case "DELETE":
+		if resource != "" {
+			http.Error(w, "Cannot delete sub-resources", http.StatusBadRequest)
+			return
+		}
+		d.handleDeleteSpecificRun(w, r, runID)
 	default:
-		http.Error(w, "Unknown resource", http.StatusNotFound)
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 	}
 }
 
@@ -1046,4 +1060,121 @@ func (d *BuildspyDaemon) handleIndex(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "text/html")
 	w.Write([]byte(html))
+}
+
+// Delete handlers
+func (d *BuildspyDaemon) handleDeleteRun(w http.ResponseWriter, r *http.Request) {
+	// Parse query parameters for bulk delete
+	query := r.URL.Query()
+	runIDs := query["run_id"]
+	
+	if len(runIDs) == 0 {
+		http.Error(w, "No run IDs provided", http.StatusBadRequest)
+		return
+	}
+	
+	var deletedCount int
+	var errors []string
+	
+	for _, runID := range runIDs {
+		// Check if run is currently live
+		if _, isLive := d.liveBuilds[runID]; isLive {
+			errors = append(errors, fmt.Sprintf("Cannot delete live build: %s", runID))
+			continue
+		}
+		
+		if err := d.database.DeleteBuildRun(runID); err != nil {
+			errors = append(errors, fmt.Sprintf("Failed to delete %s: %v", runID, err))
+		} else {
+			deletedCount++
+		}
+	}
+	
+	response := map[string]interface{}{
+		"deleted_count": deletedCount,
+		"total_requested": len(runIDs),
+	}
+	
+	if len(errors) > 0 {
+		response["errors"] = errors
+		w.WriteHeader(http.StatusPartialContent)
+	} else {
+		w.WriteHeader(http.StatusOK)
+	}
+	
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response)
+}
+
+func (d *BuildspyDaemon) handleDeleteSpecificRun(w http.ResponseWriter, r *http.Request, runID string) {
+	// Check if run is currently live
+	if _, isLive := d.liveBuilds[runID]; isLive {
+		http.Error(w, "Cannot delete live build", http.StatusBadRequest)
+		return
+	}
+	
+	if err := d.database.DeleteBuildRun(runID); err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			http.Error(w, "Build run not found", http.StatusNotFound)
+		} else {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+		return
+	}
+	
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{"status": "deleted"})
+}
+
+func (d *BuildspyDaemon) handleDelete(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	
+	var request struct {
+		RunIDs []string `json:"run_ids"`
+	}
+	
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+	
+	if len(request.RunIDs) == 0 {
+		http.Error(w, "No run IDs provided", http.StatusBadRequest)
+		return
+	}
+	
+	var deletedCount int
+	var errors []string
+	
+	for _, runID := range request.RunIDs {
+		// Check if run is currently live
+		if _, isLive := d.liveBuilds[runID]; isLive {
+			errors = append(errors, fmt.Sprintf("Cannot delete live build: %s", runID))
+			continue
+		}
+		
+		if err := d.database.DeleteBuildRun(runID); err != nil {
+			errors = append(errors, fmt.Sprintf("Failed to delete %s: %v", runID, err))
+		} else {
+			deletedCount++
+		}
+	}
+	
+	response := map[string]interface{}{
+		"deleted_count": deletedCount,
+		"total_requested": len(request.RunIDs),
+	}
+	
+	if len(errors) > 0 {
+		response["errors"] = errors
+		w.WriteHeader(http.StatusPartialContent)
+	} else {
+		w.WriteHeader(http.StatusOK)
+	}
+	
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response)
 }
