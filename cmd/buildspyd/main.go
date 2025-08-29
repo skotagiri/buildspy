@@ -106,7 +106,9 @@ func NewBuildspyDaemon(cfg *config.DaemonConfig) (*BuildspyDaemon, error) {
 	mux.HandleFunc("/", daemon.handleIndex)
 	mux.HandleFunc("/api/runs", daemon.handleRuns)
 	mux.HandleFunc("/api/runs/", daemon.handleRunDetails)
+	mux.HandleFunc("/api/live", daemon.handleLiveBuilds)
 	mux.HandleFunc("/api/stats", daemon.handleStats)
+	mux.HandleFunc("/api/live/submit", daemon.handleLiveSubmit)
 	mux.HandleFunc("/ws/live", daemon.handleLiveWebSocket)
 	mux.HandleFunc("/ws/runs/", daemon.handleRunWebSocket)
 
@@ -139,7 +141,7 @@ func (d *BuildspyDaemon) Close() {
 }
 
 func (d *BuildspyDaemon) backgroundTasks() {
-	ticker := time.NewTicker(30 * time.Second)
+	ticker := time.NewTicker(10 * time.Second) // Check every 10 seconds for faster crash detection
 	defer ticker.Stop()
 
 	for range ticker.C {
@@ -149,13 +151,43 @@ func (d *BuildspyDaemon) backgroundTasks() {
 }
 
 func (d *BuildspyDaemon) updateLiveBuilds() {
-	// Check for recently completed builds
-	cutoff := time.Now().Add(-5 * time.Minute)
+	// Check for builds that haven't sent updates recently (assume crashed/stopped)
+	cutoff := time.Now().Add(-30 * time.Second) // Reduced from 5 minutes to 30 seconds
 	for runID, monitor := range d.liveBuilds {
 		if monitor.LastSeen.Before(cutoff) {
+			// Mark build as crashed/failed in database
+			if build, err := d.database.GetBuildRun(runID); err == nil {
+				build.Status = "failed"
+				exitCode := -1 // Special exit code indicating crash/timeout
+				build.ExitCode = &exitCode
+				endTime := time.Now()
+				build.EndTime = &endTime
+				duration := endTime.Sub(build.StartTime).Milliseconds()
+				build.Duration = &duration
+				
+				if err := d.database.SaveBuildRun(build); err != nil && d.config.Verbose {
+					fmt.Printf("Warning: failed to mark crashed build %s as failed: %v\n", runID, err)
+				}
+				
+				// Create a build failure event
+				crashEvent := models.NewBuildEvent(runID, "build_crashed", models.ProcessInfo{
+					BuildRunID: runID,
+					Status:     "crashed",
+					Name:       "monitor",
+				})
+				
+				if err := d.database.SaveBuildEvent(crashEvent); err != nil && d.config.Verbose {
+					fmt.Printf("Warning: failed to save crash event for build %s: %v\n", runID, err)
+				}
+				
+				// Broadcast crash event
+				d.broadcastEvent("live", *crashEvent)
+				d.broadcastEvent("run:"+runID, *crashEvent)
+			}
+			
 			delete(d.liveBuilds, runID)
 			if d.config.Verbose {
-				fmt.Printf("Live build %s marked as completed\n", runID)
+				fmt.Printf("Live build %s marked as crashed/failed due to monitor timeout\n", runID)
 			}
 		}
 	}
@@ -203,15 +235,48 @@ func (d *BuildspyDaemon) handleListRuns(w http.ResponseWriter, r *http.Request) 
 		runs = runs[:limit]
 	}
 
-	// Add live status
+	// Filter out live builds from the normal runs list
+	var filteredRuns []*models.BuildRun
 	for _, run := range runs {
-		if _, isLive := d.liveBuilds[run.ID]; isLive {
-			run.Status = "running_live"
+		if _, isLive := d.liveBuilds[run.ID]; !isLive {
+			filteredRuns = append(filteredRuns, run)
 		}
 	}
+	runs = filteredRuns
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(runs)
+}
+
+func (d *BuildspyDaemon) handleLiveBuilds(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case "GET":
+		d.handleListLiveBuilds(w, r)
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (d *BuildspyDaemon) handleListLiveBuilds(w http.ResponseWriter, r *http.Request) {
+	var liveRuns []*models.BuildRun
+	
+	// Get all live builds from memory
+	for runID := range d.liveBuilds {
+		// Fetch the build run from database
+		run, err := d.database.GetBuildRun(runID)
+		if err != nil {
+			if d.config.Verbose {
+				fmt.Printf("Warning: failed to fetch live build %s: %v\n", runID, err)
+			}
+			continue
+		}
+		
+		run.Status = "running_live"
+		liveRuns = append(liveRuns, run)
+	}
+	
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(liveRuns)
 }
 
 func (d *BuildspyDaemon) handleRunDetails(w http.ResponseWriter, r *http.Request) {
@@ -291,6 +356,98 @@ func (d *BuildspyDaemon) handleStats(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(stats)
+}
+
+// HandleLiveSubmit receives live build data from CLI tools
+func (d *BuildspyDaemon) handleLiveSubmit(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var submission struct {
+		Type string      `json:"type"` // "build_run", "build_event", "process"
+		Data interface{} `json:"data"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&submission); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	switch submission.Type {
+	case "build_run":
+		var buildRun models.BuildRun
+		data, _ := json.Marshal(submission.Data)
+		if err := json.Unmarshal(data, &buildRun); err != nil {
+			http.Error(w, "Invalid build run data", http.StatusBadRequest)
+			return
+		}
+		
+		if err := d.database.SaveBuildRun(&buildRun); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		
+		// Mark as live build
+		d.liveBuilds[buildRun.ID] = &LiveBuildMonitor{
+			BuildRunID: buildRun.ID,
+			StartTime:  buildRun.StartTime,
+			LastSeen:   time.Now(),
+		}
+
+	case "build_event":
+		var buildEvent models.BuildEvent
+		data, _ := json.Marshal(submission.Data)
+		if err := json.Unmarshal(data, &buildEvent); err != nil {
+			http.Error(w, "Invalid build event data", http.StatusBadRequest)
+			return
+		}
+		
+		if err := d.database.SaveBuildEvent(&buildEvent); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		
+		// Handle build completion
+		if buildEvent.Type == "build_complete" {
+			if _, exists := d.liveBuilds[buildEvent.BuildRunID]; exists {
+				delete(d.liveBuilds, buildEvent.BuildRunID)
+				if d.config.Verbose {
+					fmt.Printf("Build %s completed and moved from live to normal builds\n", buildEvent.BuildRunID)
+				}
+			}
+		} else {
+			// Update live build timestamp for other events
+			if monitor, exists := d.liveBuilds[buildEvent.BuildRunID]; exists {
+				monitor.LastSeen = time.Now()
+			}
+		}
+		
+		// Broadcast to WebSocket subscribers
+		d.broadcastEvent("live", buildEvent)
+		d.broadcastEvent("run:"+buildEvent.BuildRunID, buildEvent)
+
+	case "process":
+		var processInfo models.ProcessInfo
+		data, _ := json.Marshal(submission.Data)
+		if err := json.Unmarshal(data, &processInfo); err != nil {
+			http.Error(w, "Invalid process data", http.StatusBadRequest)
+			return
+		}
+		
+		if err := d.database.SaveProcess(&processInfo); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+	default:
+		http.Error(w, "Unknown submission type", http.StatusBadRequest)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{"status": "success"})
 }
 
 // WebSocket handlers
@@ -494,7 +651,12 @@ func (d *BuildspyDaemon) handleIndex(w http.ResponseWriter, r *http.Request) {
         </div>
 
         <div class="section">
-            <h3>📋 Build Runs</h3>
+            <h3>🔴 Live Builds</h3>
+            <div id="live-builds-list" class="runs-list"></div>
+        </div>
+        
+        <div class="section">
+            <h3>📋 Completed Builds</h3>
             <div id="runs-list" class="runs-list"></div>
         </div>
         
@@ -515,6 +677,18 @@ func (d *BuildspyDaemon) handleIndex(w http.ResponseWriter, r *http.Request) {
         document.addEventListener('DOMContentLoaded', function() {
             loadStats();
             loadRuns();
+            loadLiveBuilds();
+            
+            // Start auto-refresh for live builds every 2 seconds
+            setInterval(() => {
+                loadLiveBuilds();
+                loadStats(); // Also refresh stats to show live build count
+                
+                // If a run is selected and it's a live build, refresh its details too
+                if (selectedRunId) {
+                    refreshSelectedRunIfLive();
+                }
+            }, 2000);
             
             document.getElementById('search').addEventListener('input', function(e) {
                 setTimeout(() => loadRuns(e.target.value), 300);
@@ -523,6 +697,7 @@ func (d *BuildspyDaemon) handleIndex(w http.ResponseWriter, r *http.Request) {
             document.getElementById('refresh-btn').addEventListener('click', function() {
                 loadStats();
                 loadRuns();
+                loadLiveBuilds();
                 if (selectedRunId) {
                     loadRunDetails(selectedRunId);
                 }
@@ -574,12 +749,38 @@ func (d *BuildspyDaemon) handleIndex(w http.ResponseWriter, r *http.Request) {
             }
         }
 
+        async function loadLiveBuilds() {
+            try {
+                const response = await fetch('/api/live');
+                const liveBuilds = await response.json();
+                displayLiveBuilds(liveBuilds || []);
+            } catch (error) {
+                console.error('Error loading live builds:', error);
+            }
+        }
+
+        async function refreshSelectedRunIfLive() {
+            try {
+                // Check if the selected run is in the live builds
+                const response = await fetch('/api/live');
+                const liveBuilds = await response.json();
+                const isLive = liveBuilds && liveBuilds.some(build => build.id === selectedRunId);
+                
+                if (isLive) {
+                    // Refresh the chart for the live build
+                    loadRunDetails(selectedRunId);
+                }
+            } catch (error) {
+                console.error('Error checking if selected run is live:', error);
+            }
+        }
+
         function displayRuns(runs) {
             const container = document.getElementById('runs-list');
             container.innerHTML = '';
             
             if (runs.length === 0) {
-                container.innerHTML = '<div class="no-runs">No build runs found</div>';
+                container.innerHTML = '<div class="no-runs">No completed builds found</div>';
                 return;
             }
             
@@ -596,13 +797,48 @@ func (d *BuildspyDaemon) handleIndex(w http.ResponseWriter, r *http.Request) {
                     'running_live': '🔴'
                 }[run.status] || '⚪';
                 
+                // Special handling for crashed builds (exit code -1)
+                const isCrashed = run.exit_code === -1;
+                const displayIcon = isCrashed ? '💥' : statusIcon;
+                
                 item.innerHTML = ` + "`" + `
-                    <div><strong>${statusIcon} ${run.command} ${run.args.join(' ')}</strong></div>
+                    <div><strong>${displayIcon} ${run.command} ${run.args.join(' ')}</strong></div>
                     <div class="run-meta">
                         ${new Date(run.start_time).toLocaleString()} | 
                         Duration: ${duration} | 
                         Processes: ${run.process_count || 0} |
-                        Exit: ${run.exit_code !== null ? run.exit_code : 'N/A'}
+                        Exit: ${isCrashed ? 'CRASHED' : (run.exit_code !== null ? run.exit_code : 'N/A')}
+                    </div>
+                ` + "`" + `;
+                
+                container.appendChild(item);
+            });
+        }
+
+        function displayLiveBuilds(builds) {
+            const container = document.getElementById('live-builds-list');
+            container.innerHTML = '';
+            
+            if (builds.length === 0) {
+                container.innerHTML = '<div class="no-runs">No live builds running</div>';
+                return;
+            }
+            
+            builds.forEach(build => {
+                const item = document.createElement('div');
+                item.className = ` + "`" + `run-item running_live ${selectedRunId === build.id ? 'selected' : ''}` + "`" + `;
+                item.onclick = () => selectRun(build.id);
+                
+                const duration = Date.now() - new Date(build.start_time).getTime();
+                const durationStr = ` + "`" + `${(duration / 1000).toFixed(1)}s` + "`" + `;
+                
+                item.innerHTML = ` + "`" + `
+                    <div><strong>🔴 ${build.command} ${build.args.join(' ')}</strong></div>
+                    <div class="run-meta">
+                        ${new Date(build.start_time).toLocaleString()} | 
+                        Running for: ${durationStr} | 
+                        Processes: ${build.process_count || 0} |
+                        Status: LIVE
                     </div>
                 ` + "`" + `;
                 
@@ -613,7 +849,7 @@ func (d *BuildspyDaemon) handleIndex(w http.ResponseWriter, r *http.Request) {
         function selectRun(runId) {
             selectedRunId = runId;
             
-            // Update selected item visual state
+            // Update selected item visual state for both lists
             document.querySelectorAll('.run-item').forEach(item => {
                 item.classList.remove('selected');
             });

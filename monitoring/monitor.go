@@ -114,15 +114,19 @@ func (pm *ProcessMonitor) updateProcessTree(rootPID int32) {
 				}
 				pm.processes[pid] = procInfo
 
-				// Save to database
-				if err := pm.database.SaveProcess(procInfo); err != nil && pm.verbose {
-					fmt.Printf("Warning: failed to save process %d: %v\n", pid, err)
+				// Save to database (if not in daemon mode)
+				if pm.database != nil {
+					if err := pm.database.SaveProcess(procInfo); err != nil && pm.verbose {
+						fmt.Printf("Warning: failed to save process %d: %v\n", pid, err)
+					}
 				}
 
 				// Create process start event
 				startEvent := models.NewBuildEvent(pm.buildRun.ID, "process_start", *procInfo)
-				if err := pm.database.SaveBuildEvent(startEvent); err != nil && pm.verbose {
-					fmt.Printf("Warning: failed to save start event for process %d: %v\n", pid, err)
+				if pm.database != nil {
+					if err := pm.database.SaveBuildEvent(startEvent); err != nil && pm.verbose {
+						fmt.Printf("Warning: failed to save start event for process %d: %v\n", pid, err)
+					}
 				}
 
 				// Notify event handler
@@ -147,15 +151,19 @@ func (pm *ProcessMonitor) updateProcessTree(rootPID int32) {
 			procInfo.EndTime = &now
 			procInfo.Status = "completed"
 
-			// Save updated process
-			if err := pm.database.SaveProcess(procInfo); err != nil && pm.verbose {
-				fmt.Printf("Warning: failed to update ended process %d: %v\n", pid, err)
+			// Save updated process (if not in daemon mode)
+			if pm.database != nil {
+				if err := pm.database.SaveProcess(procInfo); err != nil && pm.verbose {
+					fmt.Printf("Warning: failed to update ended process %d: %v\n", pid, err)
+				}
 			}
 
 			// Create process end event
 			endEvent := models.NewBuildEvent(pm.buildRun.ID, "process_end", *procInfo)
-			if err := pm.database.SaveBuildEvent(endEvent); err != nil && pm.verbose {
-				fmt.Printf("Warning: failed to save end event for process %d: %v\n", pid, err)
+			if pm.database != nil {
+				if err := pm.database.SaveBuildEvent(endEvent); err != nil && pm.verbose {
+					fmt.Printf("Warning: failed to save end event for process %d: %v\n", pid, err)
+				}
 			}
 
 			// Notify event handler
@@ -253,8 +261,10 @@ func (pm *ProcessMonitor) updateProcessInfo(proc *process.Process) {
 	// Save resource update events only for significant activity
 	if procInfo.CPUUsage > 5.0 || len(procInfo.Children) > 0 {
 		resourceEvent := models.NewBuildEvent(pm.buildRun.ID, "resource_update", *procInfo)
-		if err := pm.database.SaveBuildEvent(resourceEvent); err != nil && pm.verbose {
-			fmt.Printf("Warning: failed to save resource event for process %d: %v\n", pid, err)
+		if pm.database != nil {
+			if err := pm.database.SaveBuildEvent(resourceEvent); err != nil && pm.verbose {
+				fmt.Printf("Warning: failed to save resource event for process %d: %v\n", pid, err)
+			}
 		}
 
 		// Notify event handler

@@ -26,3 +26,39 @@
 - CLI and daemon now import shared packages instead of duplicating code
 - Fixed flag conflicts by renaming verbose flags from -v to -verbose
 - Successfully tested both CLI tool and daemon with new architecture
+
+2025-08-29: Fixed database locking conflicts for concurrent operation:
+- Implemented daemon detection in CLI tool using HTTP health check
+- Added live submission API endpoint (/api/live/submit) in daemon 
+- CLI automatically switches between direct DB mode and daemon communication
+- Supports concurrent daemon and CLI execution without database conflicts
+- Successfully tested both standalone and daemon communication modes
+
+2025-08-29: Fixed nil pointer dereference in daemon mode:
+- Added nil checks for pm.database in monitoring code
+- ProcessMonitor now safely handles daemon mode where database is nil
+- All database operations (SaveProcess, SaveBuildEvent) now check for nil database
+- CLI tool works correctly in daemon communication mode without crashes
+
+2025-08-29: Implemented live build completion and separation:
+- Added automatic detection of build_complete events to move builds from live to normal
+- Created separate /api/live endpoint for active builds only
+- Modified /api/runs endpoint to exclude currently live builds
+- Live builds are automatically removed from live tracking when completed
+- Provides clean separation between active and completed builds in the UI
+
+2025-08-29: Added auto-refresh for live builds in web interface:
+- Split web interface into separate "Live Builds" and "Completed Builds" sections
+- Implemented automatic refresh of live builds every 2 seconds
+- Added real-time duration calculation for live builds
+- Auto-refresh also updates live build count in statistics
+- Live builds automatically disappear from live section when completed
+- No manual refresh needed - live builds update automatically in real-time
+
+2025-08-29: Implemented crash detection for monitor application:
+- Added timeout mechanism (30 seconds) to detect crashed/stopped buildspy CLI tools
+- Crashed builds are automatically marked as "failed" with exit code -1
+- Background task checks every 10 seconds for faster crash detection
+- Crashed builds show 💥 icon in web interface with "CRASHED" status
+- Creates "build_crashed" events and properly calculates duration for failed builds
+- Prevents live builds from staying stuck in "running" state indefinitely
